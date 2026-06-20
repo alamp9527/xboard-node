@@ -33,8 +33,12 @@ func (l *Limiter) UpdateUsers(users []model.UserSpec) []int {
 	defer l.mu.Unlock()
 
 	newUsers := make(map[int]model.UserSpec, len(users))
+	ownerLimits := make(map[int]int)
 	for _, u := range users {
 		newUsers[u.ID] = u
+		if u.DeviceLimit > 0 {
+			ownerLimits[u.OwnerID()] = u.DeviceLimit
+		}
 	}
 
 	// Find removed users
@@ -50,8 +54,8 @@ func (l *Limiter) UpdateUsers(users []model.UserSpec) []int {
 	// Rebuild UUID→device-limit index for O(1) lookups.
 	idx := make(map[string]int, len(newUsers))
 	for _, u := range newUsers {
-		if u.DeviceLimit > 0 {
-			idx[u.UUID] = u.DeviceLimit
+		if limit := ownerLimits[u.OwnerID()]; limit > 0 {
+			idx[u.UUID] = limit
 		}
 	}
 	l.uuidDeviceLimit = idx

@@ -113,7 +113,7 @@ func ComputeHash(nc *model.NodeSpec, users []model.UserSpec) string {
 	copy(sorted, users)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
 	for _, u := range sorted {
-		fmt.Fprintf(h, "%d:%s,", u.ID, u.UUID)
+		fmt.Fprintf(h, "%d:%d:%s,", u.ID, u.OwnerID(), u.UUID)
 	}
 	return fmt.Sprintf("%x", h.Sum(nil))
 }

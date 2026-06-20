@@ -29,18 +29,14 @@ func TestLimitDispatcher_DeviceLimitCheck(t *testing.T) {
 
 	emailToUID := make(map[string]int)
 	deviceLimits := make(map[string]int)
-	speedLimits := make(map[string]int)
 	for _, u := range users {
 		email := userEmail(u.ID)
 		emailToUID[email] = u.ID
 		if u.DeviceLimit > 0 {
 			deviceLimits[email] = u.DeviceLimit
 		}
-		if u.SpeedLimit > 0 {
-			speedLimits[email] = u.SpeedLimit
-		}
 	}
-	ld.UpdateLimits(emailToUID, deviceLimits, speedLimits)
+	ld.UpdateLimits(emailToUID, deviceLimits, nil)
 
 	email1 := userEmail(1)
 
@@ -184,7 +180,6 @@ func TestLimitDispatcher_UnlimitedUserFastPath(t *testing.T) {
 		t.Error("should have tracked some IPs")
 	}
 }
-
 
 func TestLimitDispatcher_TrackLinkPreservesReader(t *testing.T) {
 	ld := newTestDispatcher()

@@ -75,6 +75,7 @@ type LimitDispatcher struct {
 	limitedIPs   map[string]map[string]int // email → sourceIP → refcount
 	deviceLimits map[string]int            // email → max devices
 	emailToUID   map[string]int            // email → panel user ID
+	emailDevices map[string]string         // email → stable device key for alive reporting
 
 	// unlimitedIPs: users without device limit — sync.Map for lock-free access.
 	// Each entry is *ipCounter{ips sync.Map}.
@@ -145,12 +146,19 @@ func (d *LimitDispatcher) identifyAndCheck(ctx context.Context, dest net.Destina
 	email = si.User.Email
 	sourceIP = si.Source.Address.IP().String()
 	isTCP = dest.Network == net.Network_TCP
+	deviceKey := sourceIP
 
-	if d.checkDeviceLimit(email, sourceIP, isTCP) {
-		nlog.Core().Debug("xray: device limit exceeded", "email", email, "ip", sourceIP)
+	d.mu.RLock()
+	if key := d.emailDevices[email]; key != "" {
+		deviceKey = key
+	}
+	d.mu.RUnlock()
+
+	if d.checkDeviceLimit(email, deviceKey, isTCP) {
+		nlog.Core().Debug("xray: device limit exceeded", "email", email, "device", deviceKey, "ip", sourceIP)
 		return "", "", false, errors.New("device limit exceeded for " + email)
 	}
-	return email, sourceIP, isTCP, nil
+	return email, deviceKey, isTCP, nil
 }
 
 // trackLink records connection lifecycle without mutating xray-core owned
@@ -192,10 +200,11 @@ func (d *LimitDispatcher) Close() error {
 
 // ─── Limit management (called by Xray kernel) ──────────────────────────────
 
-func (d *LimitDispatcher) UpdateLimits(emailToUID map[string]int, deviceLimits, _ map[string]int) {
+func (d *LimitDispatcher) UpdateLimits(emailToUID map[string]int, deviceLimits map[string]int, emailDevices map[string]string) {
 	d.mu.Lock()
 	d.emailToUID = emailToUID
 	d.deviceLimits = deviceLimits
+	d.emailDevices = emailDevices
 	d.mu.Unlock()
 
 }
@@ -219,6 +228,7 @@ func (d *LimitDispatcher) ResetConns() {
 func (d *LimitDispatcher) GetConnectionState() (aliveIPs map[int]map[string]bool, connCount int) {
 	d.mu.RLock()
 	emailToUID := d.emailToUID
+	emailDevices := d.emailDevices
 	limitedIPs := d.limitedIPs
 	d.mu.RUnlock()
 
@@ -231,8 +241,12 @@ func (d *LimitDispatcher) GetConnectionState() (aliveIPs map[int]map[string]bool
 			continue
 		}
 		ipSet := make(map[string]bool, len(ipsMap))
-		for ip := range ipsMap {
-			ipSet[ip] = true
+		if deviceKey := emailDevices[email]; deviceKey != "" {
+			ipSet[deviceKey] = true
+		} else {
+			for ip := range ipsMap {
+				ipSet[ip] = true
+			}
 		}
 		if len(ipSet) > 0 {
 			aliveIPs[uid] = ipSet
@@ -248,6 +262,9 @@ func (d *LimitDispatcher) GetConnectionState() (aliveIPs map[int]map[string]bool
 		}
 		ic := value.(*ipCounter)
 		if ips := ic.aliveIPs(); len(ips) > 0 {
+			if deviceKey := emailDevices[email]; deviceKey != "" {
+				ips = map[string]bool{deviceKey: true}
+			}
 			// Merge with limited IPs if any
 			if existing, ok := aliveIPs[uid]; ok {
 				for ip := range ips {

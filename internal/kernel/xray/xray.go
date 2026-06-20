@@ -15,9 +15,9 @@ import (
 	"github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/common/uuid"
 	xrayCore "github.com/xtls/xray-core/core"
+	featurebandwidth "github.com/xtls/xray-core/features/bandwidth"
 	"github.com/xtls/xray-core/features/inbound"
 	"github.com/xtls/xray-core/features/stats"
-	featurebandwidth "github.com/xtls/xray-core/features/bandwidth"
 	"github.com/xtls/xray-core/infra/conf/serial"
 	xrayProxy "github.com/xtls/xray-core/proxy"
 	"github.com/xtls/xray-core/proxy/shadowsocks"
@@ -32,8 +32,8 @@ import (
 	"github.com/cedar2025/xboard-node/internal/config"
 	"github.com/cedar2025/xboard-node/internal/kernel"
 	"github.com/cedar2025/xboard-node/internal/kernel/geodata"
-	"github.com/cedar2025/xboard-node/internal/nlog"
 	"github.com/cedar2025/xboard-node/internal/model"
+	"github.com/cedar2025/xboard-node/internal/nlog"
 )
 
 const (
@@ -314,7 +314,7 @@ func (x *Xray) AddUsers(users []model.UserSpec) (int, error) {
 		x.users = merged
 		x.mu.Unlock()
 		x.updateDispatcherLimits(merged)
-	x.updateBandwidthLimits(merged)
+		x.updateBandwidthLimits(merged)
 		return 0, nil
 	}
 
@@ -719,6 +719,7 @@ func (x *Xray) aggregateStats() (map[int][2]int64, error) {
 	traffic := make(map[int][2]int64)
 	for _, u := range x.users {
 		email := userEmail(u.ID)
+		ownerID := u.OwnerID()
 
 		var dUp, dDown int64
 		if c := mgr.GetCounter(fmt.Sprintf("user>>>%s>>>traffic>>>uplink", email)); c != nil {
@@ -729,14 +730,14 @@ func (x *Xray) aggregateStats() (map[int][2]int64, error) {
 		}
 
 		if dUp > 0 || dDown > 0 {
-			cum := x.cumTraffic[u.ID]
+			cum := x.cumTraffic[ownerID]
 			cum[0] += dUp
 			cum[1] += dDown
-			x.cumTraffic[u.ID] = cum
+			x.cumTraffic[ownerID] = cum
 		}
 
-		if cum := x.cumTraffic[u.ID]; cum[0] > 0 || cum[1] > 0 {
-			traffic[u.ID] = cum
+		if cum := x.cumTraffic[ownerID]; cum[0] > 0 || cum[1] > 0 {
+			traffic[ownerID] = cum
 		}
 	}
 	return traffic, nil
@@ -789,18 +790,31 @@ func (x *Xray) updateDispatcherLimits(users []model.UserSpec) {
 
 	emailToUID := make(map[string]int, len(users)*2)
 	deviceLimits := make(map[string]int)
+	emailDevices := make(map[string]string)
+	ownerLimits := make(map[int]int)
 
 	for _, u := range users {
-		email := userEmail(u.ID)
-		emailToUID[email] = u.ID
-		emailToUID[u.UUID] = u.ID
 		if u.DeviceLimit > 0 {
-			deviceLimits[email] = u.DeviceLimit
-			deviceLimits[u.UUID] = u.DeviceLimit
+			ownerLimits[u.OwnerID()] = u.DeviceLimit
 		}
 	}
 
-	ld.UpdateLimits(emailToUID, deviceLimits, nil)
+	for _, u := range users {
+		email := userEmail(u.ID)
+		ownerID := u.OwnerID()
+		emailToUID[email] = ownerID
+		emailToUID[u.UUID] = ownerID
+		if u.DeviceID != "" {
+			emailDevices[email] = u.DeviceID
+			emailDevices[u.UUID] = u.DeviceID
+		}
+		if limit := ownerLimits[ownerID]; limit > 0 {
+			deviceLimits[email] = limit
+			deviceLimits[u.UUID] = limit
+		}
+	}
+
+	ld.UpdateLimits(emailToUID, deviceLimits, emailDevices)
 }
 
 // xrayCreationMu serialises xrayCore.New() + globalLimitDispatcher capture

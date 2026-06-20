@@ -122,10 +122,11 @@ func (u *userStats) aliveIPList() map[string]bool {
 //   - Close callback to decrement IP refcounts
 //   - Per-connection rate limit token accumulation (amortized WaitN)
 type ConnTracker struct {
-	usersMu sync.RWMutex
-	users   map[int]*userStats  // userID → stats
-	uuidMap map[string]int      // UUID → userID (for lookup in RoutedConnection)
-	connMap map[string]net.Conn // connID → conn (only for force-close support)
+	usersMu   sync.RWMutex
+	users     map[int]*userStats  // userID → stats
+	uuidMap   map[string]int      // UUID → owner userID (for lookup in RoutedConnection)
+	deviceMap map[string]string   // UUID → stable device key for alive reporting
+	connMap   map[string]net.Conn // connID → conn (only for force-close support)
 
 	idCounter atomic.Int64
 
@@ -146,6 +147,7 @@ func NewConnTracker(_ int) *ConnTracker {
 	return &ConnTracker{
 		users:         make(map[int]*userStats),
 		uuidMap:       make(map[string]int),
+		deviceMap:     make(map[string]string),
 		connMap:       make(map[string]net.Conn),
 		globalDevices: make(map[int]map[string]bool),
 	}
@@ -161,12 +163,18 @@ func (t *ConnTracker) SetDeviceLimitFunc(fn func(uuid string) (int, bool)) {
 	t.deviceLimitFunc.Store(&fn)
 }
 
-// SetUserMap replaces the UUID→userID mapping and ensures per-user stats
+// SetUserMap replaces the UUID→owner userID mapping and ensures per-user stats
 // structs exist for all users. Old users that are no longer present keep
 // their stats until their connections drain.
 func (t *ConnTracker) SetUserMap(m map[string]int) {
+	t.SetUserMaps(m, nil)
+}
+
+// SetUserMaps replaces credential identity mappings.
+func (t *ConnTracker) SetUserMaps(m map[string]int, devices map[string]string) {
 	t.usersMu.Lock()
 	t.uuidMap = m
+	t.deviceMap = devices
 	for _, uid := range m {
 		if _, ok := t.users[uid]; !ok {
 			t.users[uid] = &userStats{ips: make(map[string]int)}
@@ -214,15 +222,19 @@ func (t *ConnTracker) RoutedConnection(
 
 	t.usersMu.RLock()
 	uid := t.uuidMap[uuid]
+	deviceKey := t.deviceMap[uuid]
 	us := t.users[uid]
 	t.usersMu.RUnlock()
+	if deviceKey == "" {
+		deviceKey = sourceIP
+	}
 
 	// Device limit gate-keeping
 	if dlf := t.deviceLimitFunc.Load(); dlf != nil {
 		if limit, hasLimit := (*dlf)(uuid); hasLimit {
-			if t.checkDeviceGate(us, uid, sourceIP, limit) {
+			if t.checkDeviceGate(us, uid, deviceKey, limit) {
 				nlog.Core().Info("singbox: device limit gate-keep, rejecting connection",
-					"user", uuid, "ip", sourceIP, "limit", limit)
+					"user", uuid, "device", deviceKey, "ip", sourceIP, "limit", limit)
 				conn.Close()
 				return conn
 			}
@@ -231,7 +243,7 @@ func (t *ConnTracker) RoutedConnection(
 
 	// Register connection
 	if us != nil {
-		us.addConn(sourceIP)
+		us.addConn(deviceKey)
 	}
 
 	connID := t.nextID()
@@ -252,7 +264,7 @@ func (t *ConnTracker) RoutedConnection(
 		us:       us,
 		userID:   uid,
 		connID:   connID,
-		sourceIP: sourceIP,
+		sourceIP: deviceKey,
 		limiter:  lim,
 		ctx:      ctx,
 	}
@@ -272,15 +284,19 @@ func (t *ConnTracker) RoutedPacketConnection(
 
 	t.usersMu.RLock()
 	uid := t.uuidMap[uuid]
+	deviceKey := t.deviceMap[uuid]
 	us := t.users[uid]
 	t.usersMu.RUnlock()
+	if deviceKey == "" {
+		deviceKey = sourceIP
+	}
 
 	// Device limit gate-keeping
 	if dlf := t.deviceLimitFunc.Load(); dlf != nil {
 		if limit, hasLimit := (*dlf)(uuid); hasLimit {
-			if t.checkDeviceGate(us, uid, sourceIP, limit) {
+			if t.checkDeviceGate(us, uid, deviceKey, limit) {
 				nlog.Core().Info("singbox: device limit gate-keep, rejecting UDP connection",
-					"user", uuid, "ip", sourceIP, "limit", limit)
+					"user", uuid, "device", deviceKey, "ip", sourceIP, "limit", limit)
 				conn.Close()
 				return conn
 			}
@@ -288,7 +304,7 @@ func (t *ConnTracker) RoutedPacketConnection(
 	}
 
 	if us != nil {
-		us.addConn(sourceIP)
+		us.addConn(deviceKey)
 	}
 
 	connID := t.nextID()
@@ -304,7 +320,7 @@ func (t *ConnTracker) RoutedPacketConnection(
 		us:         us,
 		userID:     uid,
 		connID:     connID,
-		sourceIP:   sourceIP,
+		sourceIP:   deviceKey,
 		limiter:    lim,
 		ctx:        ctx,
 	}

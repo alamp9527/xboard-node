@@ -18,8 +18,8 @@ type SpeedTrackerLogCallback func(msg string)
 type SpeedTracker struct {
 	limiter *Limiter
 	mu      sync.RWMutex
-	buckets map[int]*rate.Limiter // userID → shared rate limiter
-	uuidMap map[string]int        // UUID → userID
+	buckets map[int]*rate.Limiter // owner userID → shared rate limiter
+	uuidMap map[string]int        // UUID → owner userID
 
 	// Fast-path: when no users have a speed limit, GetLimiter returns nil
 	// immediately without any map lookup.
@@ -43,7 +43,7 @@ func (t *SpeedTracker) SetLogCallback(f SpeedTrackerLogCallback) {
 	t.logFunc = f
 }
 
-// UpdateBuckets updates the UUID→userID mapping and syncs existing limiters.
+// UpdateBuckets updates the UUID→owner userID mapping and syncs existing limiters.
 func (t *SpeedTracker) UpdateBuckets() {
 	currentUsers := make([]model.UserSpec, 0, 32)
 	t.limiter.mu.RLock()
@@ -57,33 +57,39 @@ func (t *SpeedTracker) UpdateBuckets() {
 		defer t.mu.Unlock()
 
 		newUUIDMap := make(map[string]int, len(currentUsers))
-		activeIDs := make(map[int]struct{}, len(currentUsers))
+		activeOwners := make(map[int]struct{}, len(currentUsers))
+		ownerLimits := make(map[int]int)
 
 		for _, user := range currentUsers {
-			activeIDs[user.ID] = struct{}{}
+			ownerID := user.OwnerID()
+			activeOwners[ownerID] = struct{}{}
 			if user.UUID != "" {
-				newUUIDMap[user.UUID] = user.ID
+				newUUIDMap[user.UUID] = ownerID
 			}
+			if user.SpeedLimit > 0 {
+				ownerLimits[ownerID] = user.SpeedLimit
+			}
+		}
 
-			// Update existing limiter if speed changed
-			if lim, ok := t.buckets[user.ID]; ok {
-				if user.SpeedLimit > 0 {
-					bytesPerSec := int(user.SpeedLimit) * 1_000_000 / 8
-					burst := bytesPerSec
-					if burst < 64*1024 {
-						burst = 64 * 1024
-					}
-					lim.SetLimit(rate.Limit(bytesPerSec))
-					lim.SetBurst(burst)
-				} else {
-					delete(t.buckets, user.ID)
+		for ownerID, speedLimit := range ownerLimits {
+			if lim, ok := t.buckets[ownerID]; ok {
+				bytesPerSec := int(speedLimit) * 1_000_000 / 8
+				burst := bytesPerSec
+				if burst < 64*1024 {
+					burst = 64 * 1024
 				}
+				lim.SetLimit(rate.Limit(bytesPerSec))
+				lim.SetBurst(burst)
 			}
 		}
 
 		// Clean up buckets for removed users
 		for id := range t.buckets {
-			if _, ok := activeIDs[id]; !ok {
+			if _, ok := activeOwners[id]; !ok {
+				delete(t.buckets, id)
+				continue
+			}
+			if _, ok := ownerLimits[id]; !ok {
 				delete(t.buckets, id)
 			}
 		}
@@ -113,17 +119,30 @@ func (t *SpeedTracker) GetLimiter(user string) *rate.Limiter {
 	}
 	t.mu.RUnlock()
 
-	// Get user info from limiter
+	// Get user info from limiter. Multiple device credentials can share the
+	// same owner bucket, so locate any active credential for this owner.
 	t.limiter.mu.RLock()
-	u, userExists := t.limiter.users[uid]
+	var (
+		speedLimit int
+		userExists bool
+	)
+	for _, u := range t.limiter.users {
+		if u.OwnerID() == uid {
+			userExists = true
+			if u.SpeedLimit > 0 {
+				speedLimit = u.SpeedLimit
+				break
+			}
+		}
+	}
 	t.limiter.mu.RUnlock()
 
-	if !userExists || u.SpeedLimit <= 0 {
+	if !userExists || speedLimit <= 0 {
 		return nil
 	}
 
 	// Create limiter on-demand
-	bytesPerSec := int(u.SpeedLimit) * 1_000_000 / 8
+	bytesPerSec := int(speedLimit) * 1_000_000 / 8
 	burst := bytesPerSec
 	if burst < 64*1024 {
 		burst = 64 * 1024

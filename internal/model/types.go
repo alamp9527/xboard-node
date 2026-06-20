@@ -79,9 +79,18 @@ type BrutalConfig struct {
 
 type UserSpec struct {
 	ID          int
+	UserID      int
+	DeviceID    string
 	UUID        string
 	SpeedLimit  int
 	DeviceLimit int
+}
+
+func (u UserSpec) OwnerID() int {
+	if u.UserID > 0 {
+		return u.UserID
+	}
+	return u.ID
 }
 
 func (n *NodeSpec) GetProxyProtocol() bool {

@@ -768,11 +768,21 @@ func (s *Service) ensureRunning() bool {
 // applyUserUpdate replaces the full user set and hot-swaps the kernel.
 // Called from WS sync.users and REST polling.
 func (s *Service) applyUserUpdate(ctx context.Context, users []model.UserSpec, newHash string) {
-	if !s.ensureRunning() {
+	prevUsers, prevHash := s.prepareUserState(users)
+
+	if !s.kernel.IsRunning() {
+		if len(users) > 0 && s.lastConfig != nil {
+			if !s.startKernel(s.lastConfig, users) {
+				s.restoreUserState(prevUsers, prevHash)
+				return
+			}
+			if newHash != "" {
+				s.lastUserHash = newHash
+			}
+		}
 		return
 	}
 
-	prevUsers, prevHash := s.prepareUserState(users)
 	added, removed, err := s.kernel.UpdateUsers(users)
 	if err != nil {
 		nlog.Core().Warn(fmt.Sprintf("UpdateUsers failed, restarting kernel: %v", err))
@@ -1117,7 +1127,10 @@ func computeUserHash(users []model.UserSpec) string {
 	for _, u := range sorted {
 		binary.LittleEndian.PutUint64(buf[:], uint64(u.ID))
 		h.Write(buf[:])
+		binary.LittleEndian.PutUint64(buf[:], uint64(u.OwnerID()))
+		h.Write(buf[:])
 		io.WriteString(h, u.UUID)
+		io.WriteString(h, u.DeviceID)
 		binary.LittleEndian.PutUint64(buf[:], uint64(u.SpeedLimit))
 		h.Write(buf[:])
 		binary.LittleEndian.PutUint64(buf[:], uint64(u.DeviceLimit))

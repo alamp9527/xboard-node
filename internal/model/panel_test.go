@@ -82,3 +82,21 @@ func TestNodeSpecFromPanelValidated(t *testing.T) {
 		}
 	})
 }
+
+func TestUserSpecsFromPanelIncludesDeviceOwner(t *testing.T) {
+	users := UserSpecsFromPanel([]panel.User{{
+		ID:          11,
+		UserID:      7,
+		DeviceID:    "ios-device",
+		UUID:        "11111111-1111-1111-1111-111111111111",
+		SpeedLimit:  8,
+		DeviceLimit: 2,
+	}})
+
+	if len(users) != 1 {
+		t.Fatalf("expected one user")
+	}
+	if users[0].ID != 11 || users[0].OwnerID() != 7 || users[0].DeviceID != "ios-device" {
+		t.Fatalf("unexpected user spec: %+v", users[0])
+	}
+}

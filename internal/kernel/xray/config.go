@@ -234,10 +234,11 @@ func buildInbound(nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert)
 	}
 }
 
-// userEmail returns the stats-tracking email for a user.
-// Format: "user@<id>" so we can parse back the user ID from stats counters.
-func userEmail(userID int) string {
-	return fmt.Sprintf("user@%d", userID)
+// userEmail returns the stats-tracking email for one proxy credential.
+// The credential ID is intentionally distinct from the billing user ID when
+// per-device credentials are enabled.
+func userEmail(credentialID int) string {
+	return fmt.Sprintf("user@%d", credentialID)
 }
 
 func buildVMess(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert) M {
