@@ -89,6 +89,9 @@ panel:
 	if cfg.Cert.CertDir != expectedCertDir {
 		t.Errorf("default cert_dir: got %q, want %q", cfg.Cert.CertDir, expectedCertDir)
 	}
+	if cfg.Node.DeviceReportInterval != 10 {
+		t.Errorf("default device_report_interval: got %d, want 10", cfg.Node.DeviceReportInterval)
+	}
 }
 
 func TestLoad_MissingURL(t *testing.T) {
@@ -326,7 +329,6 @@ kernel:
 		t.Fatal("expected error for standalone mode without users")
 	}
 }
-
 
 func TestLoadRoot_LegacyConfigNormalizesToSingleInstance(t *testing.T) {
 	path := writeTemp(t, `

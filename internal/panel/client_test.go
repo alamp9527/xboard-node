@@ -240,6 +240,31 @@ func TestPushStatus_Success(t *testing.T) {
 	}
 }
 
+func TestReport_IncludesEmptyAliveSnapshot(t *testing.T) {
+	var received map[string]interface{}
+	ts, client := newTestServer(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v2/server/report" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	defer ts.Close()
+
+	err := client.Report(nil, map[int][]string{}, nil, 0, [2]uint64{}, [2]uint64{}, [2]uint64{}, nil)
+	if err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+	if _, ok := received["alive"]; !ok {
+		t.Fatalf("expected alive field in payload, got %v", received)
+	}
+	if alive, ok := received["alive"].(map[string]interface{}); !ok || len(alive) != 0 {
+		t.Fatalf("alive = %#v, want empty object", received["alive"])
+	}
+}
+
 func TestResetETags(t *testing.T) {
 	callCount := 0
 	ts, client := newTestServer(func(w http.ResponseWriter, r *http.Request) {

@@ -19,14 +19,14 @@ import (
 )
 
 type Config struct {
-	InstanceID string `yaml:"-"`
-	Panel   PanelConfig   `yaml:"panel"`
-	Node    NodeConfig    `yaml:"node"`
-	Kernel  KernelConfig  `yaml:"kernel"`
-	Cert    CertConfig    `yaml:"cert"`
-	Log     LogConfig     `yaml:"log"`
-	Runtime RuntimeConfig `yaml:"runtime"`
-	WS      WSConfig      `yaml:"ws"`
+	InstanceID string        `yaml:"-"`
+	Panel      PanelConfig   `yaml:"panel"`
+	Node       NodeConfig    `yaml:"node"`
+	Kernel     KernelConfig  `yaml:"kernel"`
+	Cert       CertConfig    `yaml:"cert"`
+	Log        LogConfig     `yaml:"log"`
+	Runtime    RuntimeConfig `yaml:"runtime"`
+	WS         WSConfig      `yaml:"ws"`
 	// Standalone enables a local-only node that never contacts the panel.
 	Standalone *StandaloneConfig `yaml:"standalone,omitempty"`
 	// HealthPort enables a lightweight HTTP health-check endpoint on the
@@ -105,7 +105,7 @@ type NodeConfig struct {
 	PushInterval         int `yaml:"push_interval"`
 	PullInterval         int `yaml:"pull_interval"`
 	TrackInterval        int `yaml:"track_interval"`         // sec, default 10
-	DeviceReportInterval int `yaml:"device_report_interval"` // sec, default 30
+	DeviceReportInterval int `yaml:"device_report_interval"` // sec, default 10
 }
 
 // WSConfig holds WebSocket client tuning options.
@@ -599,7 +599,7 @@ func (c *Config) setDefaultsFrom(baseDir string) {
 		c.Node.TrackInterval = 10
 	}
 	if c.Node.DeviceReportInterval == 0 {
-		c.Node.DeviceReportInterval = 30
+		c.Node.DeviceReportInterval = 10
 	}
 }
 
