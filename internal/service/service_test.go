@@ -4,13 +4,17 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/cedar2025/xboard-node/internal/cert"
 	"github.com/cedar2025/xboard-node/internal/config"
+	"github.com/cedar2025/xboard-node/internal/controlplane"
 	"github.com/cedar2025/xboard-node/internal/kernel"
 	"github.com/cedar2025/xboard-node/internal/limiter"
 	"github.com/cedar2025/xboard-node/internal/model"
+	"github.com/cedar2025/xboard-node/internal/tracker"
 	"golang.org/x/time/rate"
 )
 
@@ -33,6 +37,11 @@ type fakeKernel struct {
 	speedLimitFunc   func(string) *rate.Limiter
 	deviceLimitFunc  func(string) (int, bool)
 	deviceChangeFunc func()
+
+	traffic    map[int][2]int64
+	alive      map[int]map[string]bool
+	connCount  int
+	trafficErr error
 }
 
 func (f *fakeKernel) Name() string                      { return "fake" }
@@ -82,7 +91,7 @@ func (f *fakeKernel) UpdateUsers(users []model.UserSpec) (int, int, error) {
 }
 func (f *fakeKernel) GetUserTraffic(ctx context.Context) (map[int][2]int64, map[int]map[string]bool, int, error) {
 	_ = ctx
-	return nil, nil, 0, nil
+	return f.traffic, f.alive, f.connCount, f.trafficErr
 }
 func (f *fakeKernel) CloseConnection(ctx context.Context, connID string) error {
 	_, _ = ctx, connID
@@ -102,6 +111,7 @@ func newTestService(k *fakeKernel) *Service {
 	sharedLimiter := limiter.New()
 	s := &Service{
 		kernel:       k,
+		tracker:      tracker.New(),
 		limiter:      sharedLimiter,
 		speedTracker: limiter.NewSpeedTracker(sharedLimiter),
 		cert:         cert.NewManager(config.CertConfig{}),
@@ -109,6 +119,41 @@ func newTestService(k *fakeKernel) *Service {
 	k.SetSpeedLimitFunc(s.speedTracker.GetLimiter)
 	k.SetDeviceLimitFunc(s.limiter.GetDeviceLimitByUUID)
 	return s
+}
+
+type fakeSink struct {
+	mu      sync.Mutex
+	reports []controlplane.ReportPayload
+	err     error
+}
+
+func (f *fakeSink) Report(payload controlplane.ReportPayload) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reports = append(f.reports, payload)
+	return f.err
+}
+
+func (f *fakeSink) ReportDevices(push controlplane.PushClient, devices map[int][]string) {
+	_, _ = push, devices
+}
+
+func (f *fakeSink) SupportsReporting() bool     { return true }
+func (f *fakeSink) SupportsDeviceReports() bool { return false }
+
+func (f *fakeSink) reportCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.reports)
+}
+
+func (f *fakeSink) lastReport() controlplane.ReportPayload {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.reports) == 0 {
+		return controlplane.ReportPayload{}
+	}
+	return f.reports[len(f.reports)-1]
 }
 
 func TestApplyUserUpdatePreparesLimiterBeforeKernelUpdate(t *testing.T) {
@@ -223,6 +268,38 @@ func TestApplyUserDeltaAddPreparesLimiterBeforeKernelUpdate(t *testing.T) {
 	if s.speedTracker.GetLimiter("uuid-new") == nil {
 		t.Fatal("expected limiter for delta-added user after successful update")
 	}
+}
+
+func TestNotifyDeviceChangedSchedulesForcedRESTReport(t *testing.T) {
+	k := &fakeKernel{
+		running:   true,
+		alive:     map[int]map[string]bool{1: {"device-a": true}},
+		connCount: 1,
+	}
+	sink := &fakeSink{}
+	s := newTestService(k)
+	s.sink = sink
+	s.tracker.Process(nil, nil, 0)
+	defer s.stopDeviceChangeTimer()
+
+	s.notifyDeviceChanged()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if sink.reportCount() > 0 {
+			report := sink.lastReport()
+			if got := report.Alive[1]; len(got) != 1 || got[0] != "device-a" {
+				t.Fatalf("reported alive = %#v, want device-a", report.Alive)
+			}
+			if got := report.Online[1]; got != 1 {
+				t.Fatalf("reported online = %#v, want user 1 online count 1", report.Online)
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	t.Fatal("expected active device report")
 }
 
 func TestValidateNodeRuntimeRejectsUnsupportedDNSProvider(t *testing.T) {

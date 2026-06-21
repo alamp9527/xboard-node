@@ -67,15 +67,16 @@ type Service struct {
 	// pullResults delivers async pullViaAPI results back to the main goroutine.
 	pullResults chan pullResult
 
-	wsClient         controlplane.PushClient        // Push client (nil if push is not enabled)
-	wsEvents         chan controlplane.Event        // receives data events from push transport
-	wsStatusCh       chan controlplane.StatusChange // receives push connectivity notifications
-	wsCancel         context.CancelFunc             // cancels the WS client goroutine
-	wsDisconnectAt   time.Time                      // when WS last disconnected (zero if connected)
-	wsResyncPending  atomic.Bool
-	machineMailbox   *controlplane.NodeMailbox
-	machineMailboxCh <-chan struct{}
-	deviceChangeCh   chan struct{}
+	wsClient          controlplane.PushClient        // Push client (nil if push is not enabled)
+	wsEvents          chan controlplane.Event        // receives data events from push transport
+	wsStatusCh        chan controlplane.StatusChange // receives push connectivity notifications
+	wsCancel          context.CancelFunc             // cancels the WS client goroutine
+	wsDisconnectAt    time.Time                      // when WS last disconnected (zero if connected)
+	wsResyncPending   atomic.Bool
+	machineMailbox    *controlplane.NodeMailbox
+	machineMailboxCh  <-chan struct{}
+	deviceChangeMu    sync.Mutex
+	deviceChangeTimer *time.Timer
 
 	// metricsMu: lastUsers, lastConfig, wsClient, wsDisconnectAt (buildMetrics vs main loop).
 	metricsMu sync.RWMutex
@@ -159,18 +160,17 @@ func newService(cfg *config.Config, cp controlplane.ControlPlane) *Service {
 	st := limiter.NewSpeedTracker(l)
 
 	return &Service{
-		cfg:            cfg,
-		source:         cp,
-		sink:           cp,
-		kernel:         k,
-		tracker:        tracker.New(),
-		limiter:        l,
-		speedTracker:   st,
-		cert:           certMgr,
-		wsEvents:       make(chan controlplane.Event, 16),
-		wsStatusCh:     make(chan controlplane.StatusChange, 4),
-		pullResults:    make(chan pullResult, 1),
-		deviceChangeCh: make(chan struct{}, 1),
+		cfg:          cfg,
+		source:       cp,
+		sink:         cp,
+		kernel:       k,
+		tracker:      tracker.New(),
+		limiter:      l,
+		speedTracker: st,
+		cert:         certMgr,
+		wsEvents:     make(chan controlplane.Event, 16),
+		wsStatusCh:   make(chan controlplane.StatusChange, 4),
+		pullResults:  make(chan pullResult, 1),
 	}
 }
 
@@ -194,8 +194,6 @@ func (s *Service) Run(ctx context.Context) error {
 	reportTicker := time.NewTicker(pushInterval)
 	pullTicker := time.NewTicker(pullInterval)
 	deviceReportTicker := time.NewTicker(time.Duration(s.cfg.Node.DeviceReportInterval) * time.Second)
-	var deviceChangeTimer *time.Timer
-	var deviceChangeTimerC <-chan time.Time
 
 	// WS discovery: when in REST-only mode, periodically re-handshake to check
 	// if WS has been enabled. When WS is disconnected for too long, re-check
@@ -207,11 +205,7 @@ func (s *Service) Run(ctx context.Context) error {
 	defer pullTicker.Stop()
 	defer deviceReportTicker.Stop()
 	defer wsDiscoveryTicker.Stop()
-	defer func() {
-		if deviceChangeTimer != nil {
-			deviceChangeTimer.Stop()
-		}
-	}()
+	defer s.stopDeviceChangeTimer()
 
 	s.startWSClient(ctx)
 
@@ -229,20 +223,6 @@ func (s *Service) Run(ctx context.Context) error {
 
 		case <-deviceReportTicker.C:
 			s.reportDevices()
-
-		case <-s.deviceChangeCh:
-			if deviceChangeTimerC == nil {
-				if deviceChangeTimer == nil {
-					deviceChangeTimer = time.NewTimer(deviceChangeReportDelay)
-				} else {
-					deviceChangeTimer.Reset(deviceChangeReportDelay)
-				}
-				deviceChangeTimerC = deviceChangeTimer.C
-			}
-
-		case <-deviceChangeTimerC:
-			deviceChangeTimerC = nil
-			s.reportDevicesNowAsync(ctx)
 
 		case <-pullTicker.C:
 			// When WebSocket is connected, skip REST polling entirely.
@@ -1113,7 +1093,10 @@ func (s *Service) buildMetrics(status monitor.Status) map[string]interface{} {
 	}
 
 	// API metrics.
-	api := s.source.Metrics()
+	api := controlplane.APIMetrics{}
+	if s.source != nil {
+		api = s.source.Metrics()
+	}
 	m["api"] = map[string]interface{}{
 		"success": api.Success,
 		"failure": api.Failure,
@@ -1179,14 +1162,33 @@ func computeUserHash(users []model.UserSpec) string {
 // ─── Device management ──────────────────────────────────────────────────
 
 // notifyDeviceChanged queues an active online-device report after the kernel
-// observes a device connect/disconnect. The service loop debounces the event.
+// observes a device connect/disconnect. It debounces outside the main service
+// loop so active reports are not delayed by polling or WS event handling.
 func (s *Service) notifyDeviceChanged() {
-	if s.deviceChangeCh == nil {
+	if !s.sink.SupportsReporting() {
 		return
 	}
-	select {
-	case s.deviceChangeCh <- struct{}{}:
-	default:
+	s.deviceChangeMu.Lock()
+	defer s.deviceChangeMu.Unlock()
+
+	if s.deviceChangeTimer == nil {
+		s.deviceChangeTimer = time.AfterFunc(deviceChangeReportDelay, func() {
+			s.reportDevicesNowAsync(context.Background())
+		})
+	} else {
+		s.deviceChangeTimer.Reset(deviceChangeReportDelay)
+	}
+
+	nlog.Core().Debug("device change observed, active report scheduled",
+		"delay_ms", deviceChangeReportDelay.Milliseconds())
+}
+
+func (s *Service) stopDeviceChangeTimer() {
+	s.deviceChangeMu.Lock()
+	defer s.deviceChangeMu.Unlock()
+	if s.deviceChangeTimer != nil {
+		s.deviceChangeTimer.Stop()
+		s.deviceChangeTimer = nil
 	}
 }
 
@@ -1241,11 +1243,16 @@ func (s *Service) sendDeviceBatchForced() {
 	status := monitor.Collect()
 	metrics := s.buildMetrics(status)
 	metrics["kernel_status"] = s.kernel.IsRunning()
+	deviceCount := countDeviceSnapshot(devices)
+	nlog.Core().Debug("pushing forced device report",
+		"users", len(devices), "devices", deviceCount, "online_users", len(online))
 	if err := s.sink.Report(controlplane.ReportPayload{Alive: devices, Online: online, CPU: status.CPU, Mem: [2]uint64{status.MemTotal, status.MemUsed}, Swap: [2]uint64{status.SwapTotal, status.SwapUsed}, Disk: [2]uint64{status.DiskTotal, status.DiskUsed}, Metrics: metrics}); err != nil {
-		nlog.Core().Warn("failed to push forced device report", "error", err)
+		nlog.Core().Warn("failed to push forced device report",
+			"users", len(devices), "devices", deviceCount, "error", err)
 		return
 	}
-	nlog.Core().Debug("forced device snapshot sent via report", "users", len(devices))
+	nlog.Core().Info("forced device snapshot sent via report",
+		"users", len(devices), "devices", deviceCount)
 }
 
 // reportDevices periodically reports device snapshot to panel.
@@ -1254,10 +1261,11 @@ func (s *Service) reportDevices() {
 }
 
 func (s *Service) reportDevicesNowAsync(ctx context.Context) {
-	if !s.sink.SupportsDeviceReports() && !s.sink.SupportsReporting() {
+	if !s.sink.SupportsReporting() {
 		return
 	}
 	if !s.deviceReportActive.CompareAndSwap(false, true) {
+		nlog.Core().Debug("active device report already running, queueing another pass")
 		s.deviceReportPending.Store(true)
 		return
 	}
@@ -1272,10 +1280,21 @@ func (s *Service) reportDevicesNowAsync(ctx context.Context) {
 				}
 			}
 		}()
-		if s.refreshTrackerSnapshot(ctx) {
-			s.sendDeviceBatchForced()
+		nlog.Core().Debug("active device report refreshing kernel snapshot")
+		if !s.refreshTrackerSnapshot(ctx) {
+			nlog.Core().Warn("active device report skipped: failed to refresh kernel snapshot")
+			return
 		}
+		s.sendDeviceBatchForced()
 	}()
+}
+
+func countDeviceSnapshot(devices map[int][]string) int {
+	count := 0
+	for _, userDevices := range devices {
+		count += len(userDevices)
+	}
+	return count
 }
 
 // ─── Runtime validation ─────────────────────────────────────────────────
