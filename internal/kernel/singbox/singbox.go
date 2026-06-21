@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -658,8 +659,8 @@ func buildUserMap(users []model.UserSpec) map[string]int {
 func buildDeviceMap(users []model.UserSpec) map[string]string {
 	m := make(map[string]string, len(users))
 	for _, u := range users {
-		if u.DeviceID != "" {
-			m[u.UUID] = u.DeviceID
+		if u.ID > 0 {
+			m[u.UUID] = strconv.Itoa(u.ID)
 		}
 	}
 	return m

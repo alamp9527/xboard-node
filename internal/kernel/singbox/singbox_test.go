@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/cedar2025/xboard-node/internal/config"
+	"github.com/cedar2025/xboard-node/internal/model"
 	"github.com/sagernet/sing-box/adapter"
 	singM "github.com/sagernet/sing/common/metadata"
 	"golang.org/x/time/rate"
@@ -36,8 +37,6 @@ func TestSingBoxCapabilities(t *testing.T) {
 	}
 }
 
-
-
 type testConn struct {
 	closed bool
 	reads  [][]byte
@@ -60,11 +59,11 @@ func (c *testConn) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
-func (c *testConn) Close() error { c.closed = true; return nil }
-func (c *testConn) LocalAddr() net.Addr { return &net.TCPAddr{} }
-func (c *testConn) RemoteAddr() net.Addr { return &net.TCPAddr{} }
-func (c *testConn) SetDeadline(time.Time) error { return nil }
-func (c *testConn) SetReadDeadline(time.Time) error { return nil }
+func (c *testConn) Close() error                     { c.closed = true; return nil }
+func (c *testConn) LocalAddr() net.Addr              { return &net.TCPAddr{} }
+func (c *testConn) RemoteAddr() net.Addr             { return &net.TCPAddr{} }
+func (c *testConn) SetDeadline(time.Time) error      { return nil }
+func (c *testConn) SetReadDeadline(time.Time) error  { return nil }
 func (c *testConn) SetWriteDeadline(time.Time) error { return nil }
 
 func testInboundContext(uuid, ip string) adapter.InboundContext {
@@ -113,6 +112,36 @@ func TestConnTrackerRoutedConnectionTracksTrafficAndAliveIPs(t *testing.T) {
 	}
 	if connCount != 0 {
 		t.Fatalf("connCount after close = %d, want 0", connCount)
+	}
+}
+
+func TestConnTrackerUsesServerCredentialIDAsDeviceKey(t *testing.T) {
+	tracker := NewConnTracker(0)
+	tracker.SetUserMaps(
+		map[string]int{"uuid-ios": 1, "uuid-android": 1},
+		map[string]string{"uuid-ios": "11", "uuid-android": "12"},
+	)
+
+	ios := tracker.RoutedConnection(context.Background(), &testConn{}, testInboundContext("uuid-ios", "1.1.1.1"), nil, nil)
+	android := tracker.RoutedConnection(context.Background(), &testConn{}, testInboundContext("uuid-android", "1.1.1.1"), nil, nil)
+
+	_, alive, _ := tracker.GetUserTraffic()
+	if !alive[1]["11"] || !alive[1]["12"] || len(alive[1]) != 2 {
+		t.Fatalf("alive devices = %v, want credential ids 11 and 12", alive[1])
+	}
+
+	_ = ios.Close()
+	_ = android.Close()
+}
+
+func TestBuildDeviceMapUsesCredentialID(t *testing.T) {
+	devices := buildDeviceMap([]model.UserSpec{
+		{ID: 11, UserID: 1, DeviceID: "ios-device", UUID: "uuid-ios"},
+		{ID: 12, UserID: 1, DeviceID: "android-device", UUID: "uuid-android"},
+	})
+
+	if devices["uuid-ios"] != "11" || devices["uuid-android"] != "12" {
+		t.Fatalf("device map = %v, want credential ids", devices)
 	}
 }
 

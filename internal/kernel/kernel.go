@@ -113,7 +113,7 @@ func ComputeHash(nc *model.NodeSpec, users []model.UserSpec) string {
 	copy(sorted, users)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
 	for _, u := range sorted {
-		fmt.Fprintf(h, "%d:%d:%s,", u.ID, u.OwnerID(), u.UUID)
+		fmt.Fprintf(h, "%d:%d:%s:%s:%d:%d,", u.ID, u.OwnerID(), u.UUID, u.DeviceID, u.SpeedLimit, u.DeviceLimit)
 	}
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
@@ -133,12 +133,12 @@ func UserDiff(oldUsers, newUsers []model.UserSpec) (toAdd, toRemove []model.User
 
 	for _, u := range newUsers {
 		old, exists := oldMap[u.ID]
-		if !exists || old.UUID != u.UUID {
+		if !exists || old.UUID != u.UUID || old.DeviceID != u.DeviceID || old.OwnerID() != u.OwnerID() {
 			toAdd = append(toAdd, u)
 		}
 	}
 	for _, u := range oldUsers {
-		if _, exists := newMap[u.ID]; !exists {
+		if next, exists := newMap[u.ID]; !exists || next.UUID != u.UUID || next.DeviceID != u.DeviceID || next.OwnerID() != u.OwnerID() {
 			toRemove = append(toRemove, u)
 		}
 	}

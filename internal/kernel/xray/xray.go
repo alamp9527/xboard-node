@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -804,9 +805,10 @@ func (x *Xray) updateDispatcherLimits(users []model.UserSpec) {
 		ownerID := u.OwnerID()
 		emailToUID[email] = ownerID
 		emailToUID[u.UUID] = ownerID
-		if u.DeviceID != "" {
-			emailDevices[email] = u.DeviceID
-			emailDevices[u.UUID] = u.DeviceID
+		if u.ID > 0 {
+			deviceKey := strconv.Itoa(u.ID)
+			emailDevices[email] = deviceKey
+			emailDevices[u.UUID] = deviceKey
 		}
 		if limit := ownerLimits[ownerID]; limit > 0 {
 			deviceLimits[email] = limit
