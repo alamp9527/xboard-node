@@ -30,7 +30,7 @@ const (
 	serviceName            = "xboard-node.service"
 	serviceFilePath        = "/etc/systemd/system/xboard-node.service"
 	defaultInstallRoot     = "/etc/xboard-node"
-	downloadBase           = "https://github.com/alamp9527/Xboard/releases"
+	downloadBase           = "https://github.com/alamp9527/xboard-node/releases"
 )
 
 var (
