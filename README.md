@@ -25,7 +25,7 @@ docker run -d --restart=always --network=host \
 ### Docker Compose
 
 ```bash
-git clone -b node --depth 1 https://github.com/alamp9527/Xboard.git xboard-node
+git clone -b node --depth 1 https://github.com/alamp9527/xboard-node.git xboard-node
 cd xboard-node
 vim config/config.yml   # set panel.url / token / node_id
 docker compose up -d
@@ -35,11 +35,11 @@ docker compose up -d
 
 ```bash
 # Node mode
-curl -fsSL https://raw.githubusercontent.com/alamp9527/Xboard/node/install.sh | \
+curl -fsSL https://raw.githubusercontent.com/alamp9527/xboard-node/node/install.sh | \
   sudo bash -s -- --mode node --panel https://panel.example.com --token TOKEN --node-id 1
 
 # Machine mode
-curl -fsSL https://raw.githubusercontent.com/alamp9527/Xboard/node/install.sh | \
+curl -fsSL https://raw.githubusercontent.com/alamp9527/xboard-node/node/install.sh | \
   sudo bash -s -- --mode machine --panel https://panel.example.com --token TOKEN --machine-id 1
 
 ## xbctl
