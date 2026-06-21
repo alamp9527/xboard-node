@@ -210,17 +210,58 @@ func TestConnTrackerCheckDeviceGateMergesFreshGlobalDevices(t *testing.T) {
 	us.addConn("1.1.1.1")
 	tracker.UpdateGlobalDevices(map[int][]string{1: {"9.9.9.9"}})
 
-	if tracker.checkDeviceGate(us, 1, "2.2.2.2", 2) {
-		t.Fatal("expected lexicographically earlier candidate to remain allowed")
-	}
-	if !tracker.checkDeviceGate(us, 1, "99.99.99.99", 2) {
-		t.Fatal("expected merged local+global device state to reject lexicographically later third device")
+	if !tracker.checkDeviceGate(us, 1, "2.2.2.2", 2) {
+		t.Fatal("expected any new third device to be rejected")
 	}
 	if tracker.checkDeviceGate(us, 1, "1.1.1.1", 2) {
 		t.Fatal("existing local IP should still be allowed")
 	}
 	if tracker.checkDeviceGate(us, 1, "9.9.9.9", 2) {
 		t.Fatal("existing global IP should still be allowed")
+	}
+}
+
+func TestConnTrackerUpdateGlobalDevicesClosesOverLimitLocalConnections(t *testing.T) {
+	tracker := NewConnTracker(0)
+	tracker.SetUserMaps(
+		map[string]int{"uuid-a": 1, "uuid-b": 1},
+		map[string]string{"uuid-a": "device-b", "uuid-b": "device-c"},
+	)
+	tracker.SetDeviceLimitFunc(func(uuid string) (int, bool) {
+		return 1, true
+	})
+
+	first := &testConn{}
+	firstWrapped := tracker.RoutedConnection(context.Background(), first, testInboundContext("uuid-a", "1.1.1.1"), nil, nil)
+	if firstWrapped == first {
+		t.Fatal("expected first connection to be wrapped")
+	}
+
+	second := &testConn{}
+	secondWrapped := tracker.RoutedConnection(context.Background(), second, testInboundContext("uuid-b", "1.1.1.2"), nil, nil)
+	if secondWrapped != second {
+		t.Fatal("expected second local device to be rejected before global sync")
+	}
+
+	tracker.SetDeviceLimitFunc(func(uuid string) (int, bool) {
+		return 2, true
+	})
+	second = &testConn{}
+	secondWrapped = tracker.RoutedConnection(context.Background(), second, testInboundContext("uuid-b", "1.1.1.2"), nil, nil)
+	if secondWrapped == second {
+		t.Fatal("expected second connection to be wrapped when limit is 2")
+	}
+
+	tracker.SetDeviceLimitFunc(func(uuid string) (int, bool) {
+		return 1, true
+	})
+	tracker.UpdateGlobalDevices(map[int][]string{1: {"device-a", "device-b", "device-c"}})
+
+	if !first.closed {
+		t.Fatal("expected over-limit local connection to be closed")
+	}
+	if !second.closed {
+		t.Fatal("expected over-limit local connection to be closed")
 	}
 }
 

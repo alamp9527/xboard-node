@@ -130,10 +130,10 @@ func (u *userStats) aliveIPList() map[string]bool {
 //   - Per-connection rate limit token accumulation (amortized WaitN)
 type ConnTracker struct {
 	usersMu   sync.RWMutex
-	users     map[int]*userStats  // userID → stats
-	uuidMap   map[string]int      // UUID → owner userID (for lookup in RoutedConnection)
-	deviceMap map[string]string   // UUID → stable device key for alive reporting
-	connMap   map[string]net.Conn // connID → conn (only for force-close support)
+	users     map[int]*userStats   // userID → stats
+	uuidMap   map[string]int       // UUID → owner userID (for lookup in RoutedConnection)
+	deviceMap map[string]string    // UUID → stable device key for alive reporting
+	connMap   map[string]io.Closer // connID → tracked conn (only for force-close support)
 
 	idCounter atomic.Int64
 
@@ -158,7 +158,7 @@ func NewConnTracker(_ int) *ConnTracker {
 		users:         make(map[int]*userStats),
 		uuidMap:       make(map[string]int),
 		deviceMap:     make(map[string]string),
-		connMap:       make(map[string]net.Conn),
+		connMap:       make(map[string]io.Closer),
 		globalDevices: make(map[int]map[string]bool),
 	}
 }
@@ -223,6 +223,7 @@ func (t *ConnTracker) UpdateGlobalDevices(users map[int][]string) {
 	t.globalLastUpdate = time.Now()
 	t.globalMu.Unlock()
 	nlog.Core().Debug("global device state updated", "users", len(users))
+	t.enforceDeviceLimits()
 }
 
 // ClearGlobalDevices resets global device state (on WS disconnect).
@@ -274,19 +275,13 @@ func (t *ConnTracker) RoutedConnection(
 		}
 	}
 
-	connID := t.nextID()
-
-	// Store conn reference for force-close support
-	t.usersMu.Lock()
-	t.connMap[connID] = conn
-	t.usersMu.Unlock()
-
 	var lim *rate.Limiter
 	if slf := t.speedLimitFunc.Load(); slf != nil {
 		lim = (*slf)(uuid)
 	}
 
-	return &trackedConn{
+	connID := t.nextID()
+	tracked := &trackedConn{
 		Conn:     conn,
 		tracker:  t,
 		us:       us,
@@ -296,12 +291,16 @@ func (t *ConnTracker) RoutedConnection(
 		limiter:  lim,
 		ctx:      ctx,
 	}
+
+	// Store the tracked wrapper so force-close also updates online-device state.
+	t.usersMu.Lock()
+	t.connMap[connID] = tracked
+	t.usersMu.Unlock()
+
+	return tracked
 }
 
-// RoutedPacketConnection wraps UDP with per-user counting (UDP not in connMap).
-// Note: UDP connections are NOT stored in connMap because connMap is typed as
-// map[string]net.Conn, but PacketConn is a different interface. Force-close
-// for UDP connections is handled directly via trackedPacketConn.Close().
+// RoutedPacketConnection wraps UDP with per-user counting.
 func (t *ConnTracker) RoutedPacketConnection(
 	ctx context.Context, conn N.PacketConn,
 	metadata adapter.InboundContext,
@@ -344,7 +343,7 @@ func (t *ConnTracker) RoutedPacketConnection(
 		lim = (*slf)(uuid)
 	}
 
-	return &trackedPacketConn{
+	tracked := &trackedPacketConn{
 		PacketConn: conn,
 		tracker:    t,
 		us:         us,
@@ -354,10 +353,17 @@ func (t *ConnTracker) RoutedPacketConnection(
 		limiter:    lim,
 		ctx:        ctx,
 	}
+
+	t.usersMu.Lock()
+	t.connMap[connID] = tracked
+	t.usersMu.Unlock()
+
+	return tracked
 }
 
 // checkDeviceGate rejects connections exceeding device limit.
-// Strategy: merge local + global state when fresh; local-only when stale.
+// Strategy: existing devices may keep connecting, but a new device is rejected
+// once the local/global distinct-device count has reached the plan limit.
 func (t *ConnTracker) checkDeviceGate(us *userStats, userID int, sourceIP string, limit int) bool {
 	if us == nil || limit <= 0 {
 		return false
@@ -371,11 +377,6 @@ func (t *ConnTracker) checkDeviceGate(us *userStats, userID int, sourceIP string
 	localCount := len(us.ips)
 	us.mu.RUnlock()
 
-	// Already known locally
-	if localIPs[sourceIP] {
-		return false
-	}
-
 	// Check global state freshness
 	t.globalMu.RLock()
 	globalStale := time.Since(t.globalLastUpdate) > 60*time.Second
@@ -384,59 +385,175 @@ func (t *ConnTracker) checkDeviceGate(us *userStats, userID int, sourceIP string
 
 	// Stale or missing global state → local-only check
 	if globalStale || globalIPs == nil {
-		if localCount < limit {
+		if localIPs[sourceIP] {
 			return false
 		}
-		ipList := make([]string, 0, localCount+1)
-		for ip := range localIPs {
-			ipList = append(ipList, ip)
+		if localCount >= limit {
+			nlog.Core().Debug("device limit: local over limit, rejecting",
+				"userID", userID, "ip", sourceIP, "localIPs", localCount, "limit", limit)
+			return true
 		}
-		ipList = append(ipList, sourceIP)
-		sort.Strings(ipList)
-		for i := 0; i < limit && i < len(ipList); i++ {
-			if ipList[i] == sourceIP {
-				return false
-			}
-		}
-		nlog.Core().Debug("device limit: local over limit, rejecting",
-			"userID", userID, "ip", sourceIP, "localIPs", localCount, "limit", limit)
-		return true
-	}
-
-	// Known globally (from other node)
-	if globalIPs[sourceIP] {
 		return false
 	}
 
-	// Merge local + global
-	allIPs := make(map[string]bool)
+	isKnownDevice := localIPs[sourceIP] || globalIPs[sourceIP]
+	allIPs := make(map[string]bool, len(localIPs)+len(globalIPs))
 	for ip := range localIPs {
 		allIPs[ip] = true
 	}
 	for ip := range globalIPs {
 		allIPs[ip] = true
 	}
+	allIPs[sourceIP] = true
 
-	if len(allIPs) < limit {
+	if len(allIPs) <= limit {
 		return false
 	}
-
-	// Over limit → lexicographic selection
-	ipList := make([]string, 0, len(allIPs)+1)
-	for ip := range allIPs {
-		ipList = append(ipList, ip)
+	if !isKnownDevice {
+		nlog.Core().Debug("device limit: total over limit, rejecting",
+			"userID", userID, "ip", sourceIP, "totalIPs", len(allIPs), "limit", limit)
+		return true
 	}
-	ipList = append(ipList, sourceIP)
-	sort.Strings(ipList)
 
-	for i := 0; i < limit && i < len(ipList); i++ {
-		if ipList[i] == sourceIP {
+	allowed := make([]string, 0, len(allIPs))
+	for ip := range allIPs {
+		allowed = append(allowed, ip)
+	}
+	sort.Strings(allowed)
+	for i := 0; i < limit && i < len(allowed); i++ {
+		if allowed[i] == sourceIP {
 			return false
 		}
 	}
-	nlog.Core().Debug("device limit: total over limit, rejecting",
+
+	nlog.Core().Debug("device limit: known device outside allowed set, rejecting",
 		"userID", userID, "ip", sourceIP, "totalIPs", len(allIPs), "limit", limit)
 	return true
+}
+
+func (t *ConnTracker) enforceDeviceLimits() {
+	dlf := t.deviceLimitFunc.Load()
+	if dlf == nil || *dlf == nil {
+		return
+	}
+
+	t.usersMu.RLock()
+	limits := make(map[int]int)
+	for uuid, uid := range t.uuidMap {
+		limit, hasLimit := (*dlf)(uuid)
+		if !hasLimit || limit <= 0 {
+			continue
+		}
+		if current := limits[uid]; current == 0 || limit < current {
+			limits[uid] = limit
+		}
+	}
+
+	localDevices := make(map[int][]string, len(limits))
+	for uid, limit := range limits {
+		if limit <= 0 {
+			continue
+		}
+		us := t.users[uid]
+		if us == nil {
+			continue
+		}
+		us.mu.RLock()
+		for device := range us.ips {
+			localDevices[uid] = append(localDevices[uid], device)
+		}
+		us.mu.RUnlock()
+	}
+	t.usersMu.RUnlock()
+
+	if len(localDevices) == 0 {
+		return
+	}
+
+	t.globalMu.RLock()
+	globalFresh := !t.globalLastUpdate.IsZero() && time.Since(t.globalLastUpdate) <= 60*time.Second
+	globalDevices := make(map[int][]string, len(t.globalDevices))
+	if globalFresh {
+		for uid, devices := range t.globalDevices {
+			for device := range devices {
+				globalDevices[uid] = append(globalDevices[uid], device)
+			}
+		}
+	}
+	t.globalMu.RUnlock()
+
+	devicesToClose := make(map[int]map[string]struct{})
+	for uid, local := range localDevices {
+		limit := limits[uid]
+		if limit <= 0 {
+			continue
+		}
+
+		all := make(map[string]struct{}, len(local)+len(globalDevices[uid]))
+		for _, device := range local {
+			all[device] = struct{}{}
+		}
+		if globalFresh {
+			for _, device := range globalDevices[uid] {
+				all[device] = struct{}{}
+			}
+		}
+		if len(all) <= limit {
+			continue
+		}
+
+		ordered := make([]string, 0, len(all))
+		for device := range all {
+			ordered = append(ordered, device)
+		}
+		sort.Strings(ordered)
+
+		allowed := make(map[string]struct{}, limit)
+		for i := 0; i < limit && i < len(ordered); i++ {
+			allowed[ordered[i]] = struct{}{}
+		}
+
+		for _, device := range local {
+			if _, ok := allowed[device]; ok {
+				continue
+			}
+			if devicesToClose[uid] == nil {
+				devicesToClose[uid] = make(map[string]struct{})
+			}
+			devicesToClose[uid][device] = struct{}{}
+		}
+	}
+
+	if len(devicesToClose) == 0 {
+		return
+	}
+
+	var closers []io.Closer
+	t.usersMu.RLock()
+	for _, closer := range t.connMap {
+		switch conn := closer.(type) {
+		case *trackedConn:
+			if devicesToClose[conn.userID] != nil {
+				if _, ok := devicesToClose[conn.userID][conn.sourceIP]; ok {
+					closers = append(closers, conn)
+				}
+			}
+		case *trackedPacketConn:
+			if devicesToClose[conn.userID] != nil {
+				if _, ok := devicesToClose[conn.userID][conn.sourceIP]; ok {
+					closers = append(closers, conn)
+				}
+			}
+		}
+	}
+	t.usersMu.RUnlock()
+
+	for _, closer := range closers {
+		_ = closer.Close()
+	}
+	if len(closers) > 0 {
+		nlog.Core().Info("singbox: closed over-limit device connections", "connections", len(closers))
+	}
 }
 
 func (t *ConnTracker) nextID() string {
