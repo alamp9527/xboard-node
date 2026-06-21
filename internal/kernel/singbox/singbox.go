@@ -59,6 +59,9 @@ type SingBox struct {
 	// Set once by SetDeviceLimitFunc and forwarded to every new ConnTracker.
 	deviceLimitFunc func(string) (int, bool)
 
+	// deviceChangeFunc is called by ConnTracker on connect/disconnect events.
+	deviceChangeFunc func()
+
 	// trackerRegistered prevents duplicate AppendTracker calls on the same
 	// Router instance during Reload. Reset to false on full restart.
 	trackerRegistered bool
@@ -148,6 +151,9 @@ func (s *SingBox) Start(nodeConfig *model.NodeSpec, users []model.UserSpec, tls 
 	}
 	if s.deviceLimitFunc != nil {
 		s.connTracker.SetDeviceLimitFunc(s.deviceLimitFunc)
+	}
+	if s.deviceChangeFunc != nil {
+		s.connTracker.SetDeviceChangeCallback(s.deviceChangeFunc)
 	}
 
 	s.trackerRegistered = false
@@ -404,6 +410,16 @@ func (s *SingBox) SetDeviceLimitFunc(fn func(uuid string) (int, bool)) {
 	s.deviceLimitFunc = fn
 	if s.connTracker != nil {
 		s.connTracker.SetDeviceLimitFunc(fn)
+	}
+}
+
+// SetDeviceChangeCallback configures active device lifecycle notifications.
+func (s *SingBox) SetDeviceChangeCallback(fn func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.deviceChangeFunc = fn
+	if s.connTracker != nil {
+		s.connTracker.SetDeviceChangeCallback(fn)
 	}
 }
 

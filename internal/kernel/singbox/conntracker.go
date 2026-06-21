@@ -136,6 +136,9 @@ type ConnTracker struct {
 	// deviceLimitFunc resolves a user UUID to their device limit.
 	deviceLimitFunc atomic.Pointer[func(uuid string) (int, bool)]
 
+	// deviceChangeFunc is notified when a tracked device connects or disconnects.
+	deviceChangeFunc atomic.Pointer[func()]
+
 	// Multi-node device state from panel
 	globalDevices    map[int]map[string]bool // userID → IP → exists
 	globalMu         sync.RWMutex
@@ -161,6 +164,22 @@ func (t *ConnTracker) SetSpeedLimitFunc(fn func(uuid string) *rate.Limiter) {
 // SetDeviceLimitFunc configures the per-user device limit lookup for gate-keeping.
 func (t *ConnTracker) SetDeviceLimitFunc(fn func(uuid string) (int, bool)) {
 	t.deviceLimitFunc.Store(&fn)
+}
+
+// SetDeviceChangeCallback configures a best-effort callback for device
+// connection state changes. It must be non-blocking from the caller's view.
+func (t *ConnTracker) SetDeviceChangeCallback(fn func()) {
+	if fn == nil {
+		t.deviceChangeFunc.Store(nil)
+		return
+	}
+	t.deviceChangeFunc.Store(&fn)
+}
+
+func (t *ConnTracker) notifyDeviceChange() {
+	if fn := t.deviceChangeFunc.Load(); fn != nil && *fn != nil {
+		(*fn)()
+	}
 }
 
 // SetUserMap replaces the UUID→owner userID mapping and ensures per-user stats
@@ -244,6 +263,7 @@ func (t *ConnTracker) RoutedConnection(
 	// Register connection
 	if us != nil {
 		us.addConn(deviceKey)
+		t.notifyDeviceChange()
 	}
 
 	connID := t.nextID()
@@ -305,6 +325,7 @@ func (t *ConnTracker) RoutedPacketConnection(
 
 	if us != nil {
 		us.addConn(deviceKey)
+		t.notifyDeviceChange()
 	}
 
 	connID := t.nextID()
@@ -651,6 +672,7 @@ func (c *trackedConn) Close() error {
 	if c.closed.CompareAndSwap(false, true) {
 		if c.us != nil {
 			c.us.removeConn(c.sourceIP)
+			c.tracker.notifyDeviceChange()
 		}
 		c.tracker.removeConnRef(c.connID)
 	}
@@ -774,6 +796,7 @@ func (c *trackedPacketConn) Close() error {
 	if c.closed.CompareAndSwap(false, true) {
 		if c.us != nil {
 			c.us.removeConn(c.sourceIP)
+			c.tracker.notifyDeviceChange()
 		}
 		c.tracker.removeConnRef(c.connID)
 	}

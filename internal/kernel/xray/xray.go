@@ -270,6 +270,10 @@ func (x *Xray) SetSpeedLimitFunc(fn func(string) *rate.Limiter) {
 // gate-kept by LimitDispatcher.checkDeviceLimit at Dispatch time.
 func (x *Xray) SetDeviceLimitFunc(_ func(string) (int, bool)) {}
 
+// SetDeviceChangeCallback is a no-op for xray. Periodic device reports remain
+// the fallback for kernels that cannot cheaply observe connection lifecycle.
+func (x *Xray) SetDeviceChangeCallback(_ func()) {}
+
 // UpdateGlobalDevices is a no-op for xray — xray handles device limits differently.
 func (x *Xray) UpdateGlobalDevices(_ map[int][]string) {}
 

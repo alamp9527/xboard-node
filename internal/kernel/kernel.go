@@ -97,6 +97,10 @@ type Kernel interface {
 	// The function resolves a user UUID to (limit, hasLimit).
 	// Kernels that already gate-keep internally (e.g. xray) may no-op.
 	SetDeviceLimitFunc(fn func(uuid string) (int, bool))
+	// SetDeviceChangeCallback is called after a user device connects or
+	// disconnects. Kernels may no-op when they cannot observe connection
+	// lifecycle events cheaply; periodic device reports remain the fallback.
+	SetDeviceChangeCallback(fn func())
 	// UpdateGlobalDevices updates the global device state from panel (for multi-node).
 	UpdateGlobalDevices(users map[int][]string)
 	// ClearGlobalDevices clears the global device state (on WS disconnect).

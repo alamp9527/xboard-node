@@ -30,8 +30,9 @@ type fakeKernel struct {
 	onAddUsers    func([]model.UserSpec)
 	onRemoveUsers func([]model.UserSpec)
 
-	speedLimitFunc  func(string) *rate.Limiter
-	deviceLimitFunc func(string) (int, bool)
+	speedLimitFunc   func(string) *rate.Limiter
+	deviceLimitFunc  func(string) (int, bool)
+	deviceChangeFunc func()
 }
 
 func (f *fakeKernel) Name() string                      { return "fake" }
@@ -93,6 +94,7 @@ func (f *fakeKernel) CloseUserConnections(ctx context.Context, uuid string) erro
 }
 func (f *fakeKernel) SetSpeedLimitFunc(fn func(uuid string) *rate.Limiter) { f.speedLimitFunc = fn }
 func (f *fakeKernel) SetDeviceLimitFunc(fn func(uuid string) (int, bool))  { f.deviceLimitFunc = fn }
+func (f *fakeKernel) SetDeviceChangeCallback(fn func())                    { f.deviceChangeFunc = fn }
 func (f *fakeKernel) UpdateGlobalDevices(users map[int][]string)           { _ = users }
 func (f *fakeKernel) ClearGlobalDevices()                                  {}
 

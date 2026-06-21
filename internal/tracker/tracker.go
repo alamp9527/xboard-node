@@ -248,6 +248,10 @@ func (t *Tracker) CurrentOnline() map[int]int {
 func (t *Tracker) RestoreAliveIPs(data map[int][]string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	// Force the next FlushAliveIPs call to retry the current snapshot even if
+	// it is unchanged. This matters for empty snapshots after the last device
+	// disconnects too, where the hash is otherwise the empty string.
+	t.lastAliveIPsHash = "\x00dirty"
 	for uid, ipList := range data {
 		ips := t.aliveIPsBuf[uid]
 		if ips == nil {
