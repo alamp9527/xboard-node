@@ -198,6 +198,23 @@ func (t *Tracker) FlushAliveIPs() map[int][]string {
 	return t.aliveIPsBuf
 }
 
+// AliveIPsSnapshot returns the current per-user alive device snapshot without
+// changing the duplicate-report hash. Active lifecycle reports use this to
+// force the panel to see the latest state immediately.
+func (t *Tracker) AliveIPsSnapshot() map[int][]string {
+	s := t.live.Load()
+	out := make(map[int][]string, len(s.aliveIPs))
+	for uid, ips := range s.aliveIPs {
+		list := make([]string, 0, len(ips))
+		for ip := range ips {
+			list = append(list, ip)
+		}
+		sort.Strings(list)
+		out[uid] = list
+	}
+	return out
+}
+
 // calcAliveIPsHash computes a deterministic hash for change detection.
 func calcAliveIPsHash(aliveIPs map[int]map[string]bool) string {
 	if len(aliveIPs) == 0 {

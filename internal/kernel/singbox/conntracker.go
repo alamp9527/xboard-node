@@ -39,23 +39,30 @@ type userStats struct {
 	connCount int            // total active connections
 }
 
-// addConn registers a new connection from sourceIP.
-func (u *userStats) addConn(sourceIP string) {
+// addConn registers a new connection from sourceIP and reports whether this
+// source became newly alive.
+func (u *userStats) addConn(sourceIP string) bool {
 	u.mu.Lock()
+	wasOffline := u.ips[sourceIP] == 0
 	u.connCount++
 	u.ips[sourceIP]++
 	u.mu.Unlock()
+	return wasOffline
 }
 
-// removeConn unregisters a connection from sourceIP.
-func (u *userStats) removeConn(sourceIP string) {
+// removeConn unregisters a connection from sourceIP and reports whether this
+// source is no longer alive.
+func (u *userStats) removeConn(sourceIP string) bool {
 	u.mu.Lock()
+	becameOffline := false
 	u.connCount--
 	u.ips[sourceIP]--
 	if u.ips[sourceIP] <= 0 {
 		delete(u.ips, sourceIP)
+		becameOffline = true
 	}
 	u.mu.Unlock()
+	return becameOffline
 }
 
 // distinctIPs returns the number of distinct IPs currently connected.
@@ -262,8 +269,9 @@ func (t *ConnTracker) RoutedConnection(
 
 	// Register connection
 	if us != nil {
-		us.addConn(deviceKey)
-		t.notifyDeviceChange()
+		if us.addConn(deviceKey) {
+			t.notifyDeviceChange()
+		}
 	}
 
 	connID := t.nextID()
@@ -324,8 +332,9 @@ func (t *ConnTracker) RoutedPacketConnection(
 	}
 
 	if us != nil {
-		us.addConn(deviceKey)
-		t.notifyDeviceChange()
+		if us.addConn(deviceKey) {
+			t.notifyDeviceChange()
+		}
 	}
 
 	connID := t.nextID()
@@ -671,8 +680,9 @@ func (c *trackedConn) Write(b []byte) (int, error) {
 func (c *trackedConn) Close() error {
 	if c.closed.CompareAndSwap(false, true) {
 		if c.us != nil {
-			c.us.removeConn(c.sourceIP)
-			c.tracker.notifyDeviceChange()
+			if c.us.removeConn(c.sourceIP) {
+				c.tracker.notifyDeviceChange()
+			}
 		}
 		c.tracker.removeConnRef(c.connID)
 	}
@@ -795,8 +805,9 @@ func (c *trackedPacketConn) WritePacket(buffer *buf.Buffer, dest singM.Socksaddr
 func (c *trackedPacketConn) Close() error {
 	if c.closed.CompareAndSwap(false, true) {
 		if c.us != nil {
-			c.us.removeConn(c.sourceIP)
-			c.tracker.notifyDeviceChange()
+			if c.us.removeConn(c.sourceIP) {
+				c.tracker.notifyDeviceChange()
+			}
 		}
 		c.tracker.removeConnRef(c.connID)
 	}

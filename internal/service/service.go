@@ -1227,6 +1227,27 @@ func (s *Service) sendDeviceBatch() {
 	nlog.Core().Debug("device snapshot sent via report", "users", len(devices))
 }
 
+// sendDeviceBatchForced reports the current local device snapshot via REST
+// without hash de-dupe. It is used for connect/disconnect lifecycle events
+// where the panel should update immediately, including empty snapshots after
+// the last device disconnects.
+func (s *Service) sendDeviceBatchForced() {
+	if !s.sink.SupportsReporting() {
+		return
+	}
+
+	devices := s.tracker.AliveIPsSnapshot()
+	online := s.tracker.CurrentOnline()
+	status := monitor.Collect()
+	metrics := s.buildMetrics(status)
+	metrics["kernel_status"] = s.kernel.IsRunning()
+	if err := s.sink.Report(controlplane.ReportPayload{Alive: devices, Online: online, CPU: status.CPU, Mem: [2]uint64{status.MemTotal, status.MemUsed}, Swap: [2]uint64{status.SwapTotal, status.SwapUsed}, Disk: [2]uint64{status.DiskTotal, status.DiskUsed}, Metrics: metrics}); err != nil {
+		nlog.Core().Warn("failed to push forced device report", "error", err)
+		return
+	}
+	nlog.Core().Debug("forced device snapshot sent via report", "users", len(devices))
+}
+
 // reportDevices periodically reports device snapshot to panel.
 func (s *Service) reportDevices() {
 	s.sendDeviceBatch()
@@ -1252,7 +1273,7 @@ func (s *Service) reportDevicesNowAsync(ctx context.Context) {
 			}
 		}()
 		if s.refreshTrackerSnapshot(ctx) {
-			s.sendDeviceBatch()
+			s.sendDeviceBatchForced()
 		}
 	}()
 }

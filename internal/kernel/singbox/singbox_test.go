@@ -134,6 +134,38 @@ func TestConnTrackerUsesServerCredentialIDAsDeviceKey(t *testing.T) {
 	_ = android.Close()
 }
 
+func TestConnTrackerNotifiesOnlyDeviceSetChanges(t *testing.T) {
+	tracker := NewConnTracker(0)
+	tracker.SetUserMaps(
+		map[string]int{"uuid-1": 1},
+		map[string]string{"uuid-1": "device-1"},
+	)
+	notifications := 0
+	tracker.SetDeviceChangeCallback(func() {
+		notifications++
+	})
+
+	first := tracker.RoutedConnection(context.Background(), &testConn{}, testInboundContext("uuid-1", "1.1.1.1"), nil, nil)
+	second := tracker.RoutedConnection(context.Background(), &testConn{}, testInboundContext("uuid-1", "1.1.1.1"), nil, nil)
+	if notifications != 1 {
+		t.Fatalf("notifications after two same-device conns = %d, want 1", notifications)
+	}
+
+	if err := first.Close(); err != nil {
+		t.Fatalf("first close: %v", err)
+	}
+	if notifications != 1 {
+		t.Fatalf("notifications after first close = %d, want 1", notifications)
+	}
+
+	if err := second.Close(); err != nil {
+		t.Fatalf("second close: %v", err)
+	}
+	if notifications != 2 {
+		t.Fatalf("notifications after last close = %d, want 2", notifications)
+	}
+}
+
 func TestBuildDeviceMapUsesCredentialID(t *testing.T) {
 	devices := buildDeviceMap([]model.UserSpec{
 		{ID: 11, UserID: 1, DeviceID: "ios-device", UUID: "uuid-ios"},

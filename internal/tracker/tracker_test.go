@@ -171,6 +171,42 @@ func TestFlushAliveIPs(t *testing.T) {
 	}
 }
 
+func TestAliveIPsSnapshotBypassesFlushDedup(t *testing.T) {
+	tr := New()
+	aliveIPs := map[int]map[string]bool{
+		1: {"2.2.2.2": true, "1.1.1.1": true},
+	}
+	tr.Process(map[int][2]int64{1: {100, 200}}, aliveIPs, 2)
+
+	if first := tr.FlushAliveIPs(); len(first[1]) != 2 {
+		t.Fatalf("first flush = %v, want two devices", first)
+	}
+	if duplicate := tr.FlushAliveIPs(); duplicate != nil {
+		t.Fatalf("duplicate flush = %v, want nil", duplicate)
+	}
+
+	snapshot := tr.AliveIPsSnapshot()
+	if len(snapshot[1]) != 2 {
+		t.Fatalf("forced snapshot = %v, want two devices", snapshot)
+	}
+	if snapshot[1][0] != "1.1.1.1" || snapshot[1][1] != "2.2.2.2" {
+		t.Fatalf("forced snapshot ordering = %v", snapshot[1])
+	}
+}
+
+func TestAliveIPsSnapshotIncludesEmptyState(t *testing.T) {
+	tr := New()
+	tr.Process(nil, nil, 0)
+
+	snapshot := tr.AliveIPsSnapshot()
+	if snapshot == nil {
+		t.Fatal("forced snapshot should be an empty map, not nil")
+	}
+	if len(snapshot) != 0 {
+		t.Fatalf("forced snapshot = %v, want empty", snapshot)
+	}
+}
+
 func TestFlushAliveIPs_DedupSameIP(t *testing.T) {
 	tr := New()
 	aliveIPs := map[int]map[string]bool{
