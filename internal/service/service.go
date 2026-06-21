@@ -1241,7 +1241,7 @@ func (s *Service) sendDeviceBatchForced() {
 	metrics := s.buildMetrics(status)
 	metrics["kernel_status"] = s.kernel.IsRunning()
 	if err := s.sink.Report(controlplane.ReportPayload{Alive: devices, Online: online, CPU: status.CPU, Mem: [2]uint64{status.MemTotal, status.MemUsed}, Swap: [2]uint64{status.SwapTotal, status.SwapUsed}, Disk: [2]uint64{status.DiskTotal, status.DiskUsed}, Metrics: metrics}); err != nil {
-		nlog.Core().Warn("failed to push forced device report", "error", err)
+		// nlog.Core().Warn("failed to push forced device report", "error", err)
 		return
 	}
 }
