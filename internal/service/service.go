@@ -1178,9 +1178,6 @@ func (s *Service) notifyDeviceChanged() {
 	} else {
 		s.deviceChangeTimer.Reset(deviceChangeReportDelay)
 	}
-
-	nlog.Core().Debug("device change observed, active report scheduled",
-		"delay_ms", deviceChangeReportDelay.Milliseconds())
 }
 
 func (s *Service) stopDeviceChangeTimer() {
@@ -1243,16 +1240,10 @@ func (s *Service) sendDeviceBatchForced() {
 	status := monitor.Collect()
 	metrics := s.buildMetrics(status)
 	metrics["kernel_status"] = s.kernel.IsRunning()
-	deviceCount := countDeviceSnapshot(devices)
-	nlog.Core().Debug("pushing forced device report",
-		"users", len(devices), "devices", deviceCount, "online_users", len(online))
 	if err := s.sink.Report(controlplane.ReportPayload{Alive: devices, Online: online, CPU: status.CPU, Mem: [2]uint64{status.MemTotal, status.MemUsed}, Swap: [2]uint64{status.SwapTotal, status.SwapUsed}, Disk: [2]uint64{status.DiskTotal, status.DiskUsed}, Metrics: metrics}); err != nil {
-		nlog.Core().Warn("failed to push forced device report",
-			"users", len(devices), "devices", deviceCount, "error", err)
+		nlog.Core().Warn("failed to push forced device report", "error", err)
 		return
 	}
-	nlog.Core().Info("forced device snapshot sent via report",
-		"users", len(devices), "devices", deviceCount)
 }
 
 // reportDevices periodically reports device snapshot to panel.
@@ -1265,7 +1256,6 @@ func (s *Service) reportDevicesNowAsync(ctx context.Context) {
 		return
 	}
 	if !s.deviceReportActive.CompareAndSwap(false, true) {
-		nlog.Core().Debug("active device report already running, queueing another pass")
 		s.deviceReportPending.Store(true)
 		return
 	}
@@ -1280,21 +1270,10 @@ func (s *Service) reportDevicesNowAsync(ctx context.Context) {
 				}
 			}
 		}()
-		nlog.Core().Debug("active device report refreshing kernel snapshot")
-		if !s.refreshTrackerSnapshot(ctx) {
-			nlog.Core().Warn("active device report skipped: failed to refresh kernel snapshot")
-			return
+		if s.refreshTrackerSnapshot(ctx) {
+			s.sendDeviceBatchForced()
 		}
-		s.sendDeviceBatchForced()
 	}()
-}
-
-func countDeviceSnapshot(devices map[int][]string) int {
-	count := 0
-	for _, userDevices := range devices {
-		count += len(userDevices)
-	}
-	return count
 }
 
 // ─── Runtime validation ─────────────────────────────────────────────────
